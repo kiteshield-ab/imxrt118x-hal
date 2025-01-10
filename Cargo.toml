@@ -1,0 +1,24 @@
+[package]
+name = "imxrt118x-hal"
+authors = []
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cortex-m = "0.7"
+defmt = { version = "0.3", optional = true }
+imxrt-iomuxc = { git = "https://github.com/kiteshield-ab/imxrt-iomuxc", features = ["imxrt1180"] }
+imxrt118x-pac = { git = "https://github.com/kiteshield-ab/imxrt118x-pac" }
+imxrt-rt = "0.1.5"
+
+# Traits
+embedded-hal = "1.0.0"
+embedded-hal-async = "1.0.0"
+embedded-io = "0.6.1"
+embedded-io-async = "0.6.1"
+rand_core = { version = "0.6", default-features = false, optional = true }
+
+[features]
+default = ["defmt"]
+rt = ["imxrt118x-pac/rt"]
+defmt = ["dep:defmt", "imxrt118x-pac/defmt"]
