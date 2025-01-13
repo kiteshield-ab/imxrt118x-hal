@@ -9,7 +9,7 @@ use pads::{
     gpio_ad, gpio_aon, gpio_b1, gpio_b2, gpio_emc_b1, gpio_emc_b2, gpio_sd_b1, gpio_sd_b2,
 };
 
-mod clocks;
+pub mod clocks;
 mod dma;
 pub mod gpio;
 mod lpuart;
