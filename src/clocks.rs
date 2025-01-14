@@ -12,12 +12,8 @@
 //!    - OscRc400M (~400 MHz)
 //!    - Osc24M (24 MHz)
 //!
-pub use crate::common::ccm::*;
 
-use imxrt_ral::{
-    self as ral, anadig_osc::ANADIG_OSC, anadig_pll::ANADIG_PLL, anadig_pmu::ANADIG_PMU, ccm::CCM,
-    dcdc::DCDC, modify_reg, phy_ldo::PHY_LDO, read_reg, write_reg,
-};
+pub use crate::pac;
 
 /// M33 core speed after [`init`] call
 pub const M33_CORE_FREQ_HZ: u32 = 240_000_000;
@@ -73,46 +69,41 @@ mod dcdc {
     ///
     /// Following the C driver; this is also what seemingly BootROM does too
     /// CMSIS Pack: devices/MIMXRT1189/drivers/fsl_dcdc.h:DCDC_SetVDD1P0BuckModeTargetVoltage
-    pub(super) fn set_vdd1p0_buckmode_target_voltage(
-        dcdc: &mut DCDC,
-        target_voltage: Vdd1P0TargetVoltage,
-    ) {
-        use imxrt_ral::dcdc::REG0::STS_DC_OK::RW::SETTLED;
+    pub(super) fn set_vdd1p0_buckmode_target_voltage(target_voltage: Vdd1P0TargetVoltage) {
+        use pac::dcdc::vals::Vdd1p0ctrlDisableStep;
 
-        modify_reg!(
-            ral::dcdc, &dcdc, REG3,
-            VDD1P0CTRL_DISABLE_STEP: ENABLE
-        );
+        // TODO: Consider finding the original state (or reference BootRom state)
+        // and starting with write(), not modify()
+        pac::DCDC
+            .reg3()
+            .modify(|w| w.set_vdd1p0ctrl_disable_step(Vdd1p0ctrlDisableStep::ENABLE));
 
         // NOTE: Setting both cores, not sure which one is which :|
-        modify_reg!(
-            ral::dcdc, &dcdc, TRG_SW_0,
-            VDD1P0CTRL_TRG: target_voltage as u32,
-        );
-        modify_reg!(
-            ral::dcdc, &dcdc, TRG_SW_1,
-            VDD1P0CTRL_TRG: target_voltage as u32,
-        );
+        pac::DCDC
+            .trg_sw_0()
+            .modify(|w| w.set_vdd1p0ctrl_trg(target_voltage as _));
+        pac::DCDC
+            .trg_sw_1()
+            .modify(|w| w.set_vdd1p0ctrl_trg(target_voltage as _));
 
         poor_mans_delay(123);
-        while read_reg!(ral::dcdc, &dcdc, REG0, STS_DC_OK) != SETTLED {}
+        while !pac::DCDC.reg0().read().sts_dc_ok() {}
     }
 }
 
 mod osc_24m {
     use super::*;
+    use pac::anadig_osc::vals::*;
 
     /// Initialize external 24 MHz oscillator
-    pub(super) fn init(anadig_osc: &mut ANADIG_OSC) {
-        use ral::anadig_osc::OSC_24M_CTRL::OSC_24M_STABLE::RW::STABLE;
-        write_reg!(
-            ral::anadig_osc, &anadig_osc, OSC_24M_CTRL,
-            LP_EN: LP,               // changed // No `Rfb` resistor, running in low power mode
-            OSC_EN: ENABLE,          // changed // enable external oscillator
-        );
+    pub(super) fn init() {
+        pac::ANADIG_OSC.osc_24m_ctrl().write(|w| {
+            w.set_lp_en(LpEn::LP); // changed // No `Rfb` resistor, running in low power mode
+            w.set_osc_en(true); // changed // enable external oscillator
+        });
 
         // Wait until stable
-        while read_reg!(ral::anadig_osc, &anadig_osc, OSC_24M_CTRL, OSC_24M_STABLE) != STABLE {
+        while pac::ANADIG_OSC.osc_24m_ctrl().read().osc_24m_stable() != Osc24mStable::STABLE {
             poor_mans_delay(1000);
         }
     }
@@ -120,17 +111,17 @@ mod osc_24m {
 
 mod osc_rc_400m {
     use super::*;
+    use pac::anadig_osc::vals::*;
 
     /// Initialize internal 400 MHz RC oscillator
-    pub(super) fn init(anadig_osc: &mut ANADIG_OSC) {
+    pub(super) fn init() {
         // NOTE:
         // Generated RAL claims there is a `CLKGATE_400MEG` bitfield on position `1`.
         // However, according to reference manual it is reserved.
         // Go figure :|
-        write_reg!(
-            ral::anadig_osc, &anadig_osc, OSC_400M_CTRL1,
-            PWD: 0, // changed // setting it to "no power down"
-        );
+        pac::ANADIG_OSC.osc_400m_ctrl1().write(|w| {
+            w.set_pwd(Pwd::PD);
+        });
     }
 }
 
@@ -141,57 +132,49 @@ pub mod syspll3 {
 
     /// Following the C driver; this is also what seemingly BootROM does too
     /// CMSIS Pack: devices/MIMXRT1189/drivers/fsl_pmu.c:PMU_StaticEnablePllLdo
-    fn enable_pll_ldo_static_mode(phy_ldo: &mut PHY_LDO) {
-        write_reg!(
-            ral::phy_ldo, &phy_ldo, CTRL0,
-            LINREG_OUTPUT_TRG: 0x10,
-            LINREG_EN: 1,
-            LINREG_ILIMIT_EN: 1
-        );
+    fn enable_pll_ldo_static_mode() {
+        pac::PHY_LDO.ctrl0().write(|w| {
+            w.set_linreg_output_trg(0x10);
+            w.set_linreg_en(true);
+            w.set_linreg_ilimit_en(true);
+        });
         poor_mans_delay(1);
-        modify_reg!(
-            ral::phy_ldo, &phy_ldo, CTRL0,
-            LINREG_ILIMIT_EN: 0
-        );
+        pac::PHY_LDO.ctrl0().modify(|w| {
+            w.set_linreg_ilimit_en(false);
+        });
     }
 
     /// - Reinforce defaults on PMU registers
     /// - Add missing configuration that BootROM does when running from flash
-    fn configure_pmu(anadig_pmu: &mut ANADIG_PMU) {
-        use ral::anadig_pmu::PMU_LDO_PLL::LDO_PLL_STBY_EN;
-
-        write_reg!(
-            ral::anadig_pmu, &anadig_pmu, PMU_BIAS_CTRL,
-            FBB_M7_STBY_EN: 1, // default
-        );
-        write_reg!(ral::anadig_pmu, &anadig_pmu, PMU_BIAS_CTRL2, 0); // default
-        write_reg!(
-            ral::anadig_pmu, &anadig_pmu, PMU_REF_CTRL,
-            EN_PLL_VOL_REF_BUFFER: 1 // changed // BootROM seemingly sets this up, necessary for RAM executables to work
-        );
-        // reserved "readonly" bit gets zeroed when overwriting the whole register
-        // keeping it just for the sake of sanity
-        write_reg!(
-            ral::anadig_pmu,
-            &anadig_pmu,
-            PMU_LDO_PLL,
-            LDO_PLL_STBY_EN::mask | 1 // default
-        );
-        write_reg!(
-            ral::anadig_pmu, &anadig_pmu, PMU_POWER_DETECT_CTRL,
-            CKGB_AON1P0: ENABLE // changed // BootROM seemingly sets this up, necessary for RAM executables to work
-        );
+    fn configure_pmu() {
+        use pac::anadig_pmu::vals::*;
+        pac::ANADIG_PMU.pmu_bias_ctrl().write(|w| {
+            w.set_fbb_m7_stby_en(FbbM7StbyEn::DISABLE) // default
+        });
+        pac::ANADIG_PMU.pmu_bias_ctrl2().write(|w| w.0 = 0); // default
+        pac::ANADIG_PMU.pmu_ref_ctrl().write(|w| {
+            w.set_en_pll_vol_ref_buffer(true) // changed // BootROM seemingly sets this up, necessary for RAM executables to work
+        });
+        pac::ANADIG_PMU.pmu_ldo_pll().write(|w| {
+            // reserved "readonly" bit gets zeroed when overwriting the whole register
+            // keeping it just for the sake of sanity
+            w.0 = 1;
+            w.set_ldo_pll_stby_en(true);
+        });
+        pac::ANADIG_PMU.pmu_power_detect_ctrl().write(|w| {
+            w.set_ckgb_aon1p0(true) // changed // BootROM seemingly sets this up, necessary for RAM executables to work
+        });
     }
 
-    fn configure_power(phy_ldo: &mut PHY_LDO, anadig_pmu: &mut ANADIG_PMU) {
-        enable_pll_ldo_static_mode(phy_ldo);
+    fn configure_power() {
+        enable_pll_ldo_static_mode();
 
         // adding "some" delay to for `CKGB_AON1P0` write
         // Look: 24.4.1.28 -> PMU_POWER_DETECT_CTRL.CKGB_AON1P -> wait 1ms comment
         // Unclear if it is necessary but this docs piece mentions PHY LDO ON/OFF sequence
         poor_mans_delay(1000);
 
-        configure_pmu(anadig_pmu);
+        configure_pmu();
     }
 
     /// Initialize SysPll3
@@ -205,57 +188,53 @@ pub mod syspll3 {
     ///   - reference manual is inconsistent but default `DIV_SELECT` yields proper `f_ref*20` -> 480MHz
     /// - Power-up routine from C HAL omits PMU register writes that prevent PLL from running in RAM executables
     ///   (ROMBoot does it when running from flash)
-    pub(super) fn init(
-        anadig_pll: &mut ANADIG_PLL,
-        phy_ldo: &mut PHY_LDO,
-        anadig_pmu: &mut ANADIG_PMU,
-    ) {
-        use ral::anadig_pll::SYS_PLL3_CTRL::SYS_PLL3_STABLE;
-        configure_power(phy_ldo, anadig_pmu);
+    pub(super) fn init() {
+        use pac::anadig_pll::vals::*;
+
+        configure_power();
 
         // Configure and ungate PFD0 to follow a default BootROM configuration. PFD0 is used as a source for [`Flexspi1`] clockroot.
         // Other PFDs are not used, disabling them
-        write_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_PFD,
-            PFD0_FRAC: 13,
-            PFD0_DIV1_CLKGATE: ON,
-            PFD1_FRAC: 17,
-            PFD1_DIV1_CLKGATE: OFF,
-            PFD2_FRAC: 32,
-            PFD2_DIV1_CLKGATE: OFF,
-            PFD3_FRAC: 13,
-            PFD3_DIV1_CLKGATE: OFF,
-        );
+        pac::ANADIG_PLL.sys_pll3_pfd().write(|w| {
+            w.set_pfd0_frac(13);
+            w.set_pfd0_div1_clkgate(SysPll3PfdPfd0Div1Clkgate::ON);
+            w.set_pfd1_frac(17);
+            w.set_pfd1_div1_clkgate(SysPll3PfdPfd1Div1Clkgate::OFF);
+            w.set_pfd2_frac(32);
+            w.set_pfd2_div1_clkgate(SysPll3PfdPfd2Div1Clkgate::OFF);
+            w.set_pfd3_frac(13);
+            w.set_pfd3_div1_clkgate(SysPll3PfdPfd3Div1Clkgate::OFF);
+        });
 
-        write_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL,
-            PLL_REG_EN: 1,
-            SYS_PLL3_GATE: ENABLE,
-            DIV_SELECT: DIV1_1
-        );
+        pac::ANADIG_PLL.sys_pll3_ctrl().write(|w| {
+            w.set_pll_reg_en(true);
+            w.set_sys_pll3_gate(true);
+            w.set_div_select(DivSelect::DIV1_1);
+        });
+
         poor_mans_delay(30);
-        modify_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL,
-            POWERUP: PUP,
-            HOLD_RING_OFF: ENABLE,
-        );
+
+        pac::ANADIG_PLL.sys_pll3_ctrl().modify(|w| {
+            w.set_powerup(SysPll3CtrlPowerup::PUP);
+            w.set_hold_ring_off(SysPll3CtrlHoldRingOff::ENABLE);
+        });
+
         poor_mans_delay(30);
-        modify_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL,
-            HOLD_RING_OFF: NORMAL,
-        );
-        while read_reg!(ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL, SYS_PLL3_STABLE)
-            != SYS_PLL3_STABLE::RW::STABLE
-        {}
-        modify_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL,
-            ENABLE_CLK: 1,
-            SYS_PLL3_DIV2: 1
-        );
-        modify_reg!(
-            ral::anadig_pll, &anadig_pll, SYS_PLL3_CTRL,
-            SYS_PLL3_GATE: DISABLE
-        );
+
+        pac::ANADIG_PLL.sys_pll3_ctrl().modify(|w| {
+            w.set_hold_ring_off(SysPll3CtrlHoldRingOff::NORMAL);
+        });
+
+        while pac::ANADIG_PLL.sys_pll3_ctrl().read().sys_pll3_stable() != SysPll3Stable::STABLE {}
+
+        pac::ANADIG_PLL.sys_pll3_ctrl().modify(|w| {
+            w.set_enable_clk(true);
+            w.set_sys_pll3_div2(true);
+        });
+
+        pac::ANADIG_PLL.sys_pll3_ctrl().modify(|w| {
+            w.set_sys_pll3_gate(false);
+        });
     }
 
     /// PFD configuration
@@ -342,33 +321,32 @@ pub mod syspll3 {
     /// using XIP feature.
     ///
     /// Calling [`super::init`] will overwrite PFD configuration, thus must be called afterwards.
-    pub fn configure_pfd(anadig_pll: &mut ANADIG_PLL, pfd: Pfd, config: PfdConfig) {
+    pub fn configure_pfd(pfd: Pfd, config: PfdConfig) {
+        use imxrt118x_pac::anadig_pll::vals::*;
+
         let (en_bit, div) = match config {
-            PfdConfig::Enable(pfd_div) => (0b0, pfd_div as u32),
+            PfdConfig::Enable(pfd_div) => (0b0, pfd_div as _),
             PfdConfig::Disable => (0b1, 20), // 20 is an arbitrary value in a legal range
         };
 
+        // TODO: Unify these enums in chiptool?
         match pfd {
-            Pfd::Pfd0 => modify_reg!(
-                ral::anadig_pll, &anadig_pll, SYS_PLL3_PFD,
-                PFD0_FRAC: div,
-                PFD0_DIV1_CLKGATE: en_bit,
-            ),
-            Pfd::Pfd1 => modify_reg!(
-                ral::anadig_pll, &anadig_pll, SYS_PLL3_PFD,
-                PFD1_FRAC: div,
-                PFD1_DIV1_CLKGATE: en_bit,
-            ),
-            Pfd::Pfd2 => modify_reg!(
-                ral::anadig_pll, &anadig_pll, SYS_PLL3_PFD,
-                PFD2_FRAC: div,
-                PFD2_DIV1_CLKGATE: en_bit,
-            ),
-            Pfd::Pfd3 => modify_reg!(
-                ral::anadig_pll, &anadig_pll, SYS_PLL3_PFD,
-                PFD3_FRAC: div,
-                PFD3_DIV1_CLKGATE: en_bit,
-            ),
+            Pfd::Pfd0 => pac::ANADIG_PLL.sys_pll3_pfd().modify(|w| {
+                w.set_pfd0_frac(div);
+                w.set_pfd0_div1_clkgate(SysPll3PfdPfd0Div1Clkgate::from_bits(en_bit));
+            }),
+            Pfd::Pfd1 => pac::ANADIG_PLL.sys_pll3_pfd().modify(|w| {
+                w.set_pfd1_frac(div);
+                w.set_pfd1_div1_clkgate(SysPll3PfdPfd1Div1Clkgate::from_bits(en_bit));
+            }),
+            Pfd::Pfd2 => pac::ANADIG_PLL.sys_pll3_pfd().modify(|w| {
+                w.set_pfd2_frac(div);
+                w.set_pfd2_div1_clkgate(SysPll3PfdPfd2Div1Clkgate::from_bits(en_bit));
+            }),
+            Pfd::Pfd3 => pac::ANADIG_PLL.sys_pll3_pfd().modify(|w| {
+                w.set_pfd3_frac(div);
+                w.set_pfd3_div1_clkgate(SysPll3PfdPfd3Div1Clkgate::from_bits(en_bit));
+            }),
         }
     }
 }
@@ -385,8 +363,8 @@ pub mod clockroot {
                     const NAME: &str = stringify!($name);
                     const INDEX: usize = $clockroot_index;
 
-                    fn mux(&self) -> u32 {
-                        *self as u32
+                    fn mux(&self) -> u8 {
+                        *self as u8
                     }
                 }
             )+
@@ -405,7 +383,7 @@ pub mod clockroot {
         /// Raw value of the multiplexer ([`CLOCK_ROOT[Self::INDEX].CLOCK_ROOT_CONTROL`]) that given `self` represents
         ///
         /// Valid values are in range [0, 3]
-        fn mux(&self) -> u32;
+        fn mux(&self) -> u8;
     }
 
     /// Clock root for [`M7`] peripheral
@@ -1624,35 +1602,29 @@ pub mod clockroot {
     /// Configure a clock root
     ///
     /// Divider ([`div`]) must be reasonable, follow table 138 in 20.4.3 chapter regarding legal frequencies.
-    pub fn configure<T: Clockroot>(ccm: &mut CCM, clockroot: T, div: u8) {
-        write_reg!(
-            ral::ccm::clockroot, &ccm.CLOCK_ROOT[T::INDEX], CLOCK_ROOT_CONTROL,
-            MUX: clockroot.mux(),
-            DIV: div.saturating_sub(1) as u32, // actualDIV == DIV+1
-        );
+    pub fn configure<T: Clockroot>(clockroot: T, div: u8) {
+        use pac::ccm::vals::*;
+        pac::CCM
+            .clock_root(T::INDEX)
+            .clock_root_control()
+            .write(|w| {
+                w.set_mux(Mux::from_bits(clockroot.mux()));
+                w.set_div(div.saturating_sub(1)); // actualDIV == DIV+1
+            });
     }
 
     /// Inspect clock root registers and print out values via `defmt`
-    #[cfg(feature = "defmt")]
-    pub fn inspect<T: Clockroot>(ccm: &mut CCM) {
-        let val = read_reg!(
-            ral::ccm::clockroot,
-            &ccm.CLOCK_ROOT[T::INDEX],
-            CLOCK_ROOT_CONTROL
-        );
+    pub fn inspect<T: Clockroot>() {
+        let val = pac::CCM.clock_root(T::INDEX).clock_root_control().read();
         defmt::info!(
-            "CLOCK_ROOT[{} / {}].CLOCK_ROOT_CONTROL: {:#x}",
+            "CLOCK_ROOT[{} / {}].CLOCK_ROOT_CONTROL: {:#?}",
             T::INDEX,
             T::NAME,
             val
         );
-        let val = read_reg!(
-            ral::ccm::clockroot,
-            &ccm.CLOCK_ROOT[T::INDEX],
-            CLOCK_ROOT_STATUS0
-        );
+        let val = pac::CCM.clock_root(T::INDEX).clock_root_status0().read();
         defmt::info!(
-            "CLOCK_ROOT[{} / {}].CLOCK_ROOT_STATUS0: {:#x}",
+            "CLOCK_ROOT[{} / {}].CLOCK_ROOT_STATUS0: {:#?}",
             T::INDEX,
             T::NAME,
             val
@@ -1670,34 +1642,33 @@ pub mod clockroot {
 /// - switch FlexSPI1 to SysPll3Pfd0 with div: 5 (~133MHz)
 ///
 /// Use [`clockroot::configure`] function in order to configure more clockroots
-pub fn init(
-    anadig_osc: &mut ANADIG_OSC,
-    anadig_pll: &mut ANADIG_PLL,
-    anadig_pmu: &mut ANADIG_PMU,
-    ccm: &mut CCM,
-    dcdc: &mut DCDC,
-    phy_ldo: &mut PHY_LDO,
-) {
+pub fn init() {
     // Unclear if it is necessary
     // - C codegen from clock tool does this
     // - BootROM does this when running from flash
     // Doing the same thing for the sake of completeness.
-    osc_rc_400m::init(anadig_osc);
-    clockroot::configure(ccm, clockroot::M33::FromOscRc400M, 2);
+    defmt::debug!("init osc rc 400m");
+    osc_rc_400m::init();
+    defmt::debug!("switch M33 to osc rc 400m");
+    clockroot::configure(clockroot::M33::FromOscRc400M, 2);
 
     // Prerequisite for running a core with frequency > 200MHz
-    dcdc::set_vdd1p0_buckmode_target_voltage(dcdc, dcdc::Vdd1P0TargetVoltage::V1100);
+    defmt::debug!("set vdd1p0 to 1.1V");
+    dcdc::set_vdd1p0_buckmode_target_voltage(dcdc::Vdd1P0TargetVoltage::V1100);
 
-    osc_24m::init(anadig_osc);
+    defmt::debug!("init osc 24m");
+    osc_24m::init();
 
-    syspll3::init(anadig_pll, phy_ldo, anadig_pmu);
+    defmt::debug!("init syspll3");
+    syspll3::init();
 
-    clockroot::configure(ccm, clockroot::M33::FromSysPll3Out, 2); // 480/2 -> 240MHz
+    defmt::debug!("switch M33 to syspll3");
+    clockroot::configure(clockroot::M33::FromSysPll3Out, 2); // 480/2 -> 240MHz
 
-    clockroot::configure(ccm, clockroot::Flexspi1::FromSysPll3Pfd0, 5); // 480*18/13/5 -> ~133MHz // Restoring BootROM configuration
+    defmt::debug!("switch FlexSpi1 to syspll3pfd0");
+    clockroot::configure(clockroot::Flexspi1::FromSysPll3Pfd0, 5); // 480*18/13/5 -> ~133MHz // Restoring BootROM configuration
 }
 
-#[cfg(feature = "defmt")]
 pub mod diag {
     //! Clock diagnostics module
 
@@ -1894,54 +1865,45 @@ pub mod diag {
         CcmCko2ClkRoot = 201,
     }
 
-    // TODO: Seems to be broken after the write to TRDC1.MDA_W0_2_DFMT1 register
+    // TODO: Seems to be broken after writing to TRDC1.MDA_W0_2_DFMT1 register
     // Has to be looked further into maybe.
     //
     /// Observe chosen clock and print out frequencies via `defmt`
-    pub fn observe_clock(ccm: &mut CCM, mux: ObserveMux) {
+    pub fn observe_clock(mux: ObserveMux) {
+        use pac::ccm::vals::*;
+
         defmt::info!("Observing: {:?}..", mux);
         // Configure
-        write_reg!(
-            ral::ccm::observe, &ccm.OBSERVE[0],
-            OBSERVE_CONTROL,
-            SELECT: mux as u32,
-            DIVIDE: 0,
-            RESET: 1
-        );
+        pac::CCM.observe(0).observe_control().write(|w| {
+            w.set_select(mux as u16);
+            w.set_divide(0);
+            w.set_reset(ObserveControlReset::RST_ASSERT);
+        });
         poor_mans_delay(10);
 
         // Reset and start the measurement
-        modify_reg!(
-            ral::ccm::observe, &ccm.OBSERVE[0],
-            OBSERVE_CONTROL,
-            RESET: 0, OFF: 0
-        );
+        pac::CCM.observe(0).observe_control().write(|w| {
+            w.set_reset(ObserveControlReset::RST_DEASSERT);
+            w.set_off(ObserveControlOff::OBS_SL_ON);
+        });
         poor_mans_delay(30000);
 
         // Stop the measurement
-        modify_reg!(
-            ral::ccm::observe, &ccm.OBSERVE[0],
-            OBSERVE_CONTROL,
-            OFF: 1
-        );
+        pac::CCM.observe(0).observe_control().write(|w| {
+            w.set_off(ObserveControlOff::OBS_SL_OFF);
+        });
         poor_mans_delay(10);
 
-        let observe_status = read_reg!(ral::ccm::observe, &ccm.OBSERVE[0], OBSERVE_STATUS);
-        defmt::info!("Status: {:#x}", observe_status);
+        let observe_status = pac::CCM.observe(0).observe_status().read();
+        defmt::info!("Status: {:#?}", observe_status);
 
-        let observe_frequency_current = read_reg!(
-            ral::ccm::observe,
-            &ccm.OBSERVE[0],
-            OBSERVE_FREQUENCY_CURRENT
-        );
+        let observe_frequency_current = pac::CCM.observe(0).observe_frequency_current().read();
         defmt::info!("Frequency Current: {} Hz", observe_frequency_current);
 
-        let observe_frequency_min =
-            read_reg!(ral::ccm::observe, &ccm.OBSERVE[0], OBSERVE_FREQUENCY_MIN);
+        let observe_frequency_min = pac::CCM.observe(0).observe_frequency_min().read();
         defmt::info!("Frequency Min: {} Hz", observe_frequency_min);
 
-        let observe_frequency_max =
-            read_reg!(ral::ccm::observe, &ccm.OBSERVE[0], OBSERVE_FREQUENCY_MAX);
+        let observe_frequency_max = pac::CCM.observe(0).observe_frequency_max().read();
         defmt::info!("Frequency Max: {} Hz", observe_frequency_max);
     }
 }
