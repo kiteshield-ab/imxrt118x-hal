@@ -3,7 +3,9 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use imxrt118x_pac as pac;
-use imxrt_iomuxc::imxrt1180::{
+pub use imxrt_iomuxc::imxrt1180 as pads;
+
+use pads::{
     gpio_ad, gpio_aon, gpio_b1, gpio_b2, gpio_emc_b1, gpio_emc_b2, gpio_sd_b1, gpio_sd_b2,
 };
 
